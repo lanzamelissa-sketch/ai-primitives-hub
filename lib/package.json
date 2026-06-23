@@ -14,7 +14,8 @@
     "publish-collections": "./bin/publish-collections.js",
     "list-collections": "./bin/list-collections.js",
     "create-skill": "./bin/create-skill.js",
-    "hub-release-analyzer": "./bin/hub-release-analyzer.js"
+    "hub-release-analyzer": "./bin/hub-release-analyzer.js",
+    "hub-ownership-analyzer": "./bin/hub-ownership-analyzer.js"
   },
   "scripts": {
     "build": "tsc",
