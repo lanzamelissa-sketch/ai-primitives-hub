@@ -3,15 +3,15 @@ import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
 const config: Config = {
-  title: "Prompt Registry",
+  title: "AI Primitives Hub",
   tagline: "Marketplace and registry for Copilot prompt bundles in VS Code",
   favicon: "img/favicon.ico",
 
   url: "https://amadeustitgroup.github.io",
-  baseUrl: "/prompt-registry/",
+  baseUrl: "/ai-primitives-hub/",
 
   organizationName: "AmadeusITGroup",
-  projectName: "prompt-registry",
+  projectName: "ai-primitives-hub",
 
   onBrokenLinks: "throw",
 
@@ -58,7 +58,7 @@ const config: Config = {
 
   themeConfig: {
     navbar: {
-      title: "Prompt Registry",
+      title: "AI Primitives Hub",
       items: [
         {
           type: "docSidebar",
@@ -91,7 +91,7 @@ const config: Config = {
           label: "Migration Guide",
         },
         {
-          href: "https://github.com/AmadeusITGroup/prompt-registry",
+          href: "https://github.com/AmadeusITGroup/ai-primitives-hub",
           label: "GitHub",
           position: "right",
         },
@@ -114,11 +114,11 @@ const config: Config = {
           items: [
             {
               label: "GitHub Discussions",
-              href: "https://github.com/AmadeusITGroup/prompt-registry/discussions",
+              href: "https://github.com/AmadeusITGroup/ai-primitives-hub/discussions",
             },
             {
               label: "Issues",
-              href: "https://github.com/AmadeusITGroup/prompt-registry/issues",
+              href: "https://github.com/AmadeusITGroup/ai-primitives-hub/issues",
             },
           ],
         },
@@ -127,11 +127,11 @@ const config: Config = {
           items: [
             {
               label: "VS Code Marketplace",
-              href: "https://marketplace.visualstudio.com/items?itemName=AmadeusITGroup.prompt-registry",
+              href: "https://marketplace.visualstudio.com/items?itemName=AmadeusITGroup.ai-primitives-hub",
             },
             {
               label: "GitHub",
-              href: "https://github.com/AmadeusITGroup/prompt-registry",
+              href: "https://github.com/AmadeusITGroup/ai-primitives-hub",
             },
           ],
         },
