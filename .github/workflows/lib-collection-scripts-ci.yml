@@ -56,6 +56,10 @@ jobs:
         working-directory: lib
         run: npm run lint
 
+      - name: Audit for vulnerabilities
+        working-directory: lib
+        run: npm audit --audit-level=high
+
       - name: Run tests
         working-directory: lib
         run: npm test

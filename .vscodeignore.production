@@ -154,6 +154,7 @@ INTEGRATION_TEST_*.md
 .specification/
 .tmp/
 lib/
+website/
 
 # Test results
 test-results/
