@@ -33,6 +33,11 @@ import {
 } from './repository-adapter';
 
 /**
+ * A single entry from the GitHub Git Trees API (recursive listing).
+ */
+type GitTreeEntry = { path: string; type: string; sha: string };
+
+/**
  * Skills adapter implementation for GitHub repositories
  * Discovers skills from skills/ directory with SKILL.md files
  */
@@ -83,89 +88,43 @@ export class SkillsAdapter extends RepositoryAdapter {
     };
   }
 
-  /**
-   * Scan skills/ directory for skill folders with SKILL.md files
-   * Uses parallel fetching with concurrency limit for better performance
-   */
-  private async scanSkillsDirectory(): Promise<SkillItem[]> {
-    const { owner, repo } = this.parseGitHubUrl();
-    const apiBase = 'https://api.github.com';
-    const skillsUrl = `${apiBase}/repos/${owner}/${repo}/contents/skills`;
-
-    this.logger.debug(`[SkillsAdapter] Scanning skills directory: ${skillsUrl}`);
-
-    try {
-      const contents: GitHubContentItem[] = await this.makeGitHubRequest(skillsUrl);
-      const skills: SkillItem[] = [];
-
-      const directories = contents.filter((item) => item.type === 'dir');
-      this.logger.debug(`[SkillsAdapter] Found ${directories.length} directories in skills/`);
-
-      // Process directories in parallel with concurrency limit
-      const CONCURRENCY_LIMIT = 5;
-
-      for (let i = 0; i < directories.length; i += CONCURRENCY_LIMIT) {
-        const chunk = directories.slice(i, i + CONCURRENCY_LIMIT);
-        this.logger.debug(`[SkillsAdapter] Processing chunk ${Math.floor(i / CONCURRENCY_LIMIT) + 1}/${Math.ceil(directories.length / CONCURRENCY_LIMIT)}`);
-
-        const chunkResults = await Promise.all(chunk.map(async (dir) => {
-          try {
-            return await this.processSkillDirectory(dir, owner, repo);
-          } catch (error) {
-            this.logger.warn(`[SkillsAdapter] Failed to process skill directory ${dir.name}: ${error}`);
-            return null;
-          }
-        }));
-
-        for (const skill of chunkResults) {
-          if (skill) {
-            skills.push(skill);
-          }
-        }
-      }
-
-      return skills;
-    } catch (error) {
-      this.logger.error(`[SkillsAdapter] Failed to scan skills directory: ${error}`);
-      throw new Error(`Failed to scan skills directory: ${error}`);
+  private async fetchRepoTree(owner: string, repo: string, branch: string): Promise<GitTreeEntry[]> {
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+    this.logger.debug(`[SkillsAdapter] Fetching repo tree: ${url}`);
+    const result = await this.makeGitHubRequest(url);
+    if (!Array.isArray(result.tree)) {
+      throw new Error(`Unexpected response from Git Trees API for ${owner}/${repo}: missing tree array`);
     }
+    if (result.truncated) {
+      this.logger.warn(`[SkillsAdapter] Git tree for ${owner}/${repo} is truncated; proceeding with partial results`);
+    }
+    return result.tree;
   }
 
   /**
-   * Process a skill directory and extract skill information
-   * @param dir
+   * Build a SkillItem for a single skill from its pre-filtered tree blobs.
    * @param owner
    * @param repo
+   * @param branch
+   * @param skillId
+   * @param entries
    */
-  private async processSkillDirectory(dir: GitHubContentItem, owner: string, repo: string): Promise<SkillItem | null> {
-    const skillPath = dir.path;
-    const skillId = dir.name;
-
-    this.logger.debug(`[SkillsAdapter] Processing skill directory: ${skillId}`);
+  private async buildSkillFromTree(
+    owner: string,
+    repo: string,
+    branch: string,
+    skillId: string,
+    entries: GitTreeEntry[]
+  ): Promise<SkillItem | null> {
+    const skillPath = `skills/${skillId}`;
+    const rawSkillMdUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${skillPath}/SKILL.md`;
 
     try {
-      const apiBase = 'https://api.github.com';
-      const skillContentsUrl = `${apiBase}/repos/${owner}/${repo}/contents/${skillPath}`;
-      const skillContents: GitHubContentItem[] = await this.makeGitHubRequest(skillContentsUrl);
+      const parsedSkillMd = await this.parseSkillMd(rawSkillMdUrl);
+      const files = entries.map((entry) => this.getRelativeSkillPath(entry.path, skillPath));
+      const contentHash = this.calculateContentHash(entries);
 
-      const skillMdFile = skillContents.find((file) =>
-        file.name === 'SKILL.md' && file.type === 'file'
-      );
-
-      if (!skillMdFile) {
-        this.logger.debug(`[SkillsAdapter] Skill ${skillId} missing SKILL.md, skipping`);
-        return null;
-      }
-
-      const parsedSkillMd = await this.parseSkillMd(skillMdFile.download_url!);
-      const allFiles = await this.collectSkillFiles(owner, repo, skillContents);
-
-      const files = allFiles.map((item) => this.getRelativeSkillPath(item.path, skillPath));
-
-      // Content hash drives hash-based versioning for update detection.
-      const contentHash = this.calculateContentHash(allFiles);
-
-      const skillItem: SkillItem = {
+      return {
         id: skillId,
         name: parsedSkillMd.frontmatter.name || skillId,
         description: parsedSkillMd.frontmatter.description || 'No description',
@@ -176,12 +135,66 @@ export class SkillsAdapter extends RepositoryAdapter {
         contentHash,
         parsedSkillMd
       };
-
-      this.logger.debug(`[SkillsAdapter] Successfully processed skill: ${skillItem.name}`);
-      return skillItem;
     } catch (error) {
-      this.logger.error(`[SkillsAdapter] Error processing skill ${skillId}: ${error}`);
+      this.logger.error(`[SkillsAdapter] Error building skill ${skillId} from tree: ${error}`);
       return null;
+    }
+  }
+
+  /**
+   * Scan skills/ directory via a single Git Trees API call.
+   */
+  private async scanSkillsDirectory(): Promise<SkillItem[]> {
+    const { owner, repo } = this.parseGitHubUrl();
+    const branch = 'main';
+
+    this.logger.debug(`[SkillsAdapter] Scanning skills via git tree: ${owner}/${repo}@${branch}`);
+
+    try {
+      const tree = await this.fetchRepoTree(owner, repo, branch);
+
+      // Single O(tree) pass: group blobs under skills/<id>/ and note which
+      // skills have a top-level SKILL.md (a skill id requires SKILL.md).
+      const filesBySkill = new Map<string, GitTreeEntry[]>();
+      const skillIds = new Set<string>();
+      for (const entry of tree) {
+        if (entry.type !== 'blob') {
+          continue;
+        }
+        const segments = entry.path.split('/');
+        if (segments[0] !== 'skills' || segments.length < 3) {
+          continue;
+        }
+        const skillId = segments[1];
+        if (!filesBySkill.has(skillId)) {
+          filesBySkill.set(skillId, []);
+        }
+        filesBySkill.get(skillId)!.push(entry);
+        if (segments.length === 3 && segments[2] === 'SKILL.md') {
+          skillIds.add(skillId);
+        }
+      }
+
+      this.logger.debug(`[SkillsAdapter] Found ${skillIds.size} skills in tree`);
+
+      // Build skills in parallel with a concurrency limit to bound raw
+      // SKILL.md fetches without serializing them.
+      const ids = [...skillIds];
+      const skills: SkillItem[] = [];
+      const CONCURRENCY_LIMIT = 5;
+
+      for (let i = 0; i < ids.length; i += CONCURRENCY_LIMIT) {
+        const chunk = ids.slice(i, i + CONCURRENCY_LIMIT);
+        const chunkResults = await Promise.all(
+          chunk.map((skillId) => this.buildSkillFromTree(owner, repo, branch, skillId, filesBySkill.get(skillId) ?? []))
+        );
+        skills.push(...chunkResults.filter((s): s is SkillItem => s !== null));
+      }
+
+      return skills;
+    } catch (error) {
+      this.logger.error(`[SkillsAdapter] Failed to scan skills directory: ${error}`);
+      throw new Error(`Failed to scan skills directory: ${error}`);
     }
   }
 
@@ -265,16 +278,16 @@ export class SkillsAdapter extends RepositoryAdapter {
    * Calculate a stable hash from GitHub file metadata in the skill folder.
    * @param skillContents
    */
-  private calculateContentHash(skillContents: GitHubContentItem[]): string {
+  private calculateContentHash(skillContents: (GitHubContentItem | GitTreeEntry)[]): string {
     const hash = crypto.createHash('sha256');
     const files = skillContents
-      .filter((item) => item.type === 'file')
+      .filter((item) => item.type === 'file' || item.type === 'blob')
       .toSorted((a, b) => a.path.localeCompare(b.path));
 
     for (const file of files) {
       hash.update(file.path);
       hash.update(':');
-      hash.update(file.sha ?? file.download_url ?? '');
+      hash.update(file.sha ?? ('download_url' in file ? file.download_url : undefined) ?? '');
       hash.update('|');
     }
 

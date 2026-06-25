@@ -4,6 +4,7 @@
  */
 
 import * as assert from 'node:assert';
+import * as crypto from 'node:crypto';
 import nock from 'nock';
 import * as sinon from 'sinon';
 import {
@@ -25,79 +26,64 @@ suite('SkillsAdapter Tests', () => {
   };
 
   /**
-   * Helper to set up mock GitHub API responses for skills structure
-   * @param options
-   * @param options.skills
-   * @param options.skillsDirectoryExists
+   * Helper to compute the expected hash for a set of tree entries.
+   * Mirrors calculateContentHash: sort blobs by path, hash path + ':' + sha + '|'.
+   * @param treeEntries
    */
-  const setupSkillsStructureMocks = (options: {
-    skills?: {
-      id: string;
-      name: string;
-      description: string;
-      license?: string;
-      files?: string[];
-    }[];
-    skillsDirectoryExists?: boolean;
-  }): void => {
-    const { skills = [], skillsDirectoryExists = true } = options;
+  const computeExpectedHash = (treeEntries: { path: string; type: string; sha: string }[]): string => {
+    const hash = crypto.createHash('sha256');
+    const files = treeEntries
+      .filter((e) => e.type === 'blob')
+      .toSorted((a, b) => a.path.localeCompare(b.path));
+    for (const file of files) {
+      hash.update(file.path);
+      hash.update(':');
+      hash.update(file.sha ?? '');
+      hash.update('|');
+    }
+    return hash.digest('hex');
+  };
 
-    if (!skillsDirectoryExists) {
-      nock('https://api.github.com')
-        .get('/repos/test-owner/test-skills-repo/contents/skills')
-        .reply(404, { message: 'Not Found' });
-      return;
+  /**
+   * Helper to set up tree-based mock GitHub API responses.
+   * Mocks one GET /repos/.../git/trees/main?recursive=1 and one raw SKILL.md per skill.
+   * @param skills
+   */
+  const setupSkillsTreeMocks = (skills: {
+    id: string;
+    name: string;
+    description: string;
+    license?: string;
+    nestedFiles?: { path: string; sha: string }[];
+  }[]): nock.Scope => {
+    const treeEntries: { path: string; type: string; sha: string }[] = [];
+
+    for (const skill of skills) {
+      treeEntries.push({
+        path: `skills/${skill.id}/SKILL.md`,
+        type: 'blob',
+        sha: `sha-skillmd-${skill.id}`
+      });
+
+      for (const nf of skill.nestedFiles ?? []) {
+        treeEntries.push({ path: nf.path, type: 'blob', sha: nf.sha });
+      }
     }
 
-    // Mock skills/ directory listing (persist to allow multiple calls during validation)
-    const skillDirs = skills.map((skill) => ({
-      name: skill.id,
-      path: `skills/${skill.id}`,
-      type: 'dir' as const
-    }));
+    const treeScope = nock('https://api.github.com')
+      .get('/repos/test-owner/test-skills-repo/git/trees/main?recursive=1')
+      .reply(200, { tree: treeEntries, truncated: false });
 
-    nock('https://api.github.com')
-      .persist()
-      .get('/repos/test-owner/test-skills-repo/contents/skills')
-      .reply(200, skillDirs);
-
-    // Mock each skill directory contents and SKILL.md
     for (const skill of skills) {
-      const skillFiles = [
-        {
-          name: 'SKILL.md',
-          path: `skills/${skill.id}/SKILL.md`,
-          type: 'file' as const,
-          download_url: `https://raw.githubusercontent.com/test-owner/test-skills-repo/main/skills/${skill.id}/SKILL.md`
-        },
-        ...(skill.files || []).map((f) => ({
-          name: f,
-          path: `skills/${skill.id}/${f}`,
-          type: 'file' as const,
-          download_url: `https://raw.githubusercontent.com/test-owner/test-skills-repo/main/skills/${skill.id}/${f}`
-        }))
-      ];
-
-      nock('https://api.github.com')
-        .get(`/repos/test-owner/test-skills-repo/contents/skills/${skill.id}`)
-        .reply(200, skillFiles);
-
-      // Mock SKILL.md download
-      const skillMdContent = `---
-name: ${skill.name}
-description: ${skill.description}
-${skill.license ? `license: ${skill.license}` : ''}
----
-
-# ${skill.name}
-
-Instructions for ${skill.name}
-`;
+      const licenceLine = skill.license ? `license: ${skill.license}\n` : '';
+      const skillMdContent = `---\nname: ${skill.name}\ndescription: ${skill.description}\n${licenceLine}---\n\n# ${skill.name}\n\nInstructions for ${skill.name}\n`;
 
       nock('https://raw.githubusercontent.com')
         .get(`/test-owner/test-skills-repo/main/skills/${skill.id}/SKILL.md`)
         .reply(200, skillMdContent);
     }
+
+    return treeScope;
   };
 
   /**
@@ -148,15 +134,13 @@ Instructions for ${skill.name}
 
   suite('fetchBundles()', () => {
     test('should discover skills from skills/ directory', async () => {
-      setupSkillsStructureMocks({
-        skills: [{
-          id: 'algorithmic-art',
-          name: 'algorithmic-art',
-          description: 'Creating algorithmic art using p5.js',
-          license: 'Apache-2.0',
-          files: ['README.md']
-        }]
-      });
+      setupSkillsTreeMocks([{
+        id: 'algorithmic-art',
+        name: 'algorithmic-art',
+        description: 'Creating algorithmic art using p5.js',
+        license: 'Apache-2.0',
+        nestedFiles: [{ path: 'skills/algorithmic-art/README.md', sha: 'sha-readme' }]
+      }]);
 
       const adapter = new SkillsAdapter(mockSource);
       const bundles = await adapter.fetchBundles();
@@ -170,25 +154,11 @@ Instructions for ${skill.name}
     });
 
     test('should discover multiple skills', async () => {
-      setupSkillsStructureMocks({
-        skills: [
-          {
-            id: 'algorithmic-art',
-            name: 'algorithmic-art',
-            description: 'Creating algorithmic art'
-          },
-          {
-            id: 'code-review',
-            name: 'code-review',
-            description: 'Code review skill'
-          },
-          {
-            id: 'testing',
-            name: 'testing',
-            description: 'Testing skill'
-          }
-        ]
-      });
+      setupSkillsTreeMocks([
+        { id: 'algorithmic-art', name: 'algorithmic-art', description: 'Creating algorithmic art' },
+        { id: 'code-review', name: 'code-review', description: 'Code review skill' },
+        { id: 'testing', name: 'testing', description: 'Testing skill' }
+      ]);
 
       const adapter = new SkillsAdapter(mockSource);
       const bundles = await adapter.fetchBundles();
@@ -205,56 +175,23 @@ Instructions for ${skill.name}
     });
 
     test('should include nested files when hashing remote skills', async () => {
-      const mockNestedSkill = (assetSha: string) => {
+      const buildMocks = (assetSha: string) => {
         nock.cleanAll();
-
-        nock('https://api.github.com')
-          .get('/repos/test-owner/test-skills-repo/contents/skills')
-          .reply(200, [
-            { name: 'deep-skill', path: 'skills/deep-skill', type: 'dir' }
-          ]);
-
-        nock('https://api.github.com')
-          .get('/repos/test-owner/test-skills-repo/contents/skills/deep-skill')
-          .reply(200, [
-            {
-              name: 'SKILL.md',
-              path: 'skills/deep-skill/SKILL.md',
-              type: 'file',
-              download_url: 'https://raw.githubusercontent.com/test-owner/test-skills-repo/main/skills/deep-skill/SKILL.md',
-              sha: 'sha-skill'
-            },
-            {
-              name: 'assets',
-              path: 'skills/deep-skill/assets',
-              type: 'dir'
-            }
-          ]);
-
-        nock('https://api.github.com')
-          .get('/repos/test-owner/test-skills-repo/contents/skills/deep-skill/assets')
-          .reply(200, [
-            {
-              name: 'diagram.png',
-              path: 'skills/deep-skill/assets/diagram.png',
-              type: 'file',
-              download_url: 'https://raw.githubusercontent.com/test-owner/test-skills-repo/main/skills/deep-skill/assets/diagram.png',
-              sha: assetSha
-            }
-          ]);
-
-        nock('https://raw.githubusercontent.com')
-          .get('/test-owner/test-skills-repo/main/skills/deep-skill/SKILL.md')
-          .reply(200, '---\nname: Deep Skill\ndescription: Deep skill description\n---\n\n# Deep Skill');
+        setupSkillsTreeMocks([{
+          id: 'deep-skill',
+          name: 'Deep Skill',
+          description: 'Deep skill description',
+          nestedFiles: [{ path: 'skills/deep-skill/assets/diagram.png', sha: assetSha }]
+        }]);
       };
 
-      mockNestedSkill('sha-diagram');
+      buildMocks('sha-diagram');
       let adapter = new SkillsAdapter(mockSource);
       let bundles = await adapter.fetchBundles();
       assert.strictEqual(bundles.length, 1);
       const versionWithOriginalAsset = bundles[0].version;
 
-      mockNestedSkill('sha-diagram-updated');
+      buildMocks('sha-diagram-updated');
       adapter = new SkillsAdapter(mockSource);
       bundles = await adapter.fetchBundles();
       const versionWithUpdatedAsset = bundles[0].version;
@@ -264,73 +201,129 @@ Instructions for ${skill.name}
     });
 
     test('should handle many skills efficiently', async () => {
-      // Create 10 skills to verify the adapter handles multiple skills correctly
       const manySkills = Array.from({ length: 10 }, (_, i) => ({
         id: `skill-${i}`,
         name: `Skill ${i}`,
         description: `Description for skill ${i}`
       }));
 
-      setupSkillsStructureMocks({ skills: manySkills });
+      setupSkillsTreeMocks(manySkills);
 
       const adapter = new SkillsAdapter(mockSource);
       const bundles = await adapter.fetchBundles();
 
       assert.strictEqual(bundles.length, 10);
 
-      // Verify all skills were discovered
       for (let i = 0; i < 10; i++) {
         const bundle = bundles.find((b) => b.name === `Skill ${i}`);
         assert.ok(bundle, `Should find skill-${i}`);
         assert.strictEqual(bundle.description, `Description for skill ${i}`);
       }
     });
+  });
 
-    test('should skip directories without SKILL.md', async () => {
-      // Mock skills/ directory with one valid skill and one without SKILL.md
-      nock('https://api.github.com')
-        .get('/repos/test-owner/test-skills-repo/contents/skills')
-        .reply(200, [
-          { name: 'valid-skill', path: 'skills/valid-skill', type: 'dir' },
-          { name: 'invalid-skill', path: 'skills/invalid-skill', type: 'dir' }
-        ]);
+  suite('fetchBundles() — Git Trees API', () => {
+    test('uses a single tree call and no per-directory contents calls', async () => {
+      const treeScope = setupSkillsTreeMocks([{
+        id: 'my-skill',
+        name: 'My Skill',
+        description: 'A skill'
+      }]);
 
-      // Valid skill with SKILL.md
-      nock('https://api.github.com')
-        .get('/repos/test-owner/test-skills-repo/contents/skills/valid-skill')
-        .reply(200, [
-          { name: 'SKILL.md', path: 'skills/valid-skill/SKILL.md', type: 'file', download_url: 'https://raw.githubusercontent.com/test-owner/test-skills-repo/main/skills/valid-skill/SKILL.md' }
-        ]);
-
-      nock('https://raw.githubusercontent.com')
-        .get('/test-owner/test-skills-repo/main/skills/valid-skill/SKILL.md')
-        .reply(200, '---\nname: valid-skill\ndescription: A valid skill\n---\n\nInstructions');
-
-      // Invalid skill without SKILL.md
-      nock('https://api.github.com')
-        .get('/repos/test-owner/test-skills-repo/contents/skills/invalid-skill')
-        .reply(200, [
-          { name: 'README.md', path: 'skills/invalid-skill/README.md', type: 'file' }
-        ]);
+      // Poison the old Contents path — if hit, the test process would get a 500 error
+      const contentsScope = nock('https://api.github.com')
+        .get(/\/contents\/skills/)
+        .reply(500, { message: 'should not be called' });
 
       const adapter = new SkillsAdapter(mockSource);
       const bundles = await adapter.fetchBundles();
 
       assert.strictEqual(bundles.length, 1);
-      assert.strictEqual(bundles[0].name, 'valid-skill');
+      assert.ok(treeScope.isDone(), 'tree endpoint should have been called');
+      assert.ok(!contentsScope.isDone(), 'contents endpoint should NOT have been called');
+    });
+
+    test('produces byte-identical hash from tree blobs', async () => {
+      const nestedFiles = [{ path: 'skills/deep/assets/diagram.png', sha: 'sha-diagram' }];
+      setupSkillsTreeMocks([{
+        id: 'deep',
+        name: 'Deep Skill',
+        description: 'Deep skill description',
+        nestedFiles
+      }]);
+
+      const adapter = new SkillsAdapter(mockSource);
+      const bundles = await adapter.fetchBundles();
+
+      assert.strictEqual(bundles.length, 1);
+      assert.ok(bundles[0].version.startsWith('hash:'), 'version should be hash-based');
+
+      const treeEntries = [
+        { path: 'skills/deep/SKILL.md', type: 'blob', sha: 'sha-skillmd-deep' },
+        ...nestedFiles.map((f) => ({ ...f, type: 'blob' }))
+      ];
+      const expectedHash = computeExpectedHash(treeEntries);
+      assert.strictEqual(bundles[0].version, `hash:${expectedHash}`);
+    });
+
+    test('changing a nested blob sha changes the version', async () => {
+      const buildMocks = (assetSha: string) => {
+        nock.cleanAll();
+        setupSkillsTreeMocks([{
+          id: 'sens',
+          name: 'Sens',
+          description: 'Sensitive skill',
+          nestedFiles: [{ path: 'skills/sens/file.txt', sha: assetSha }]
+        }]);
+      };
+
+      buildMocks('sha-v1');
+      const bundles1 = await new SkillsAdapter(mockSource).fetchBundles();
+      const v1 = bundles1[0].version;
+
+      buildMocks('sha-v2');
+      const bundles2 = await new SkillsAdapter(mockSource).fetchBundles();
+      const v2 = bundles2[0].version;
+
+      assert.notStrictEqual(v1, v2);
+
+      buildMocks('sha-v1');
+      const bundles3 = await new SkillsAdapter(mockSource).fetchBundles();
+      assert.strictEqual(bundles3[0].version, v1);
+    });
+
+    test('skips skills without SKILL.md in the tree', async () => {
+      // Build tree manually: valid skill has SKILL.md, invalid skill only has README.md
+      const treeEntries = [
+        { path: 'skills/valid/SKILL.md', type: 'blob', sha: 'sha-valid' },
+        { path: 'skills/invalid/README.md', type: 'blob', sha: 'sha-invalid' }
+      ];
+
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-skills-repo/git/trees/main?recursive=1')
+        .reply(200, { tree: treeEntries, truncated: false });
+
+      nock('https://raw.githubusercontent.com')
+        .get('/test-owner/test-skills-repo/main/skills/valid/SKILL.md')
+        .reply(200, '---\nname: valid\ndescription: Valid skill\n---\n\nInstructions');
+
+      const adapter = new SkillsAdapter(mockSource);
+      const bundles = await adapter.fetchBundles();
+
+      assert.strictEqual(bundles.length, 1);
+      assert.ok(bundles[0].id.includes('valid'));
     });
   });
 
   suite('validate()', () => {
     test('should validate repository with skills/ directory', async () => {
       setupValidationMocks();
-      setupSkillsStructureMocks({
-        skills: [{
-          id: 'test-skill',
-          name: 'test-skill',
-          description: 'Test skill'
-        }]
-      });
+      // Existence probe (contents/skills) returns 200
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-skills-repo/contents/skills')
+        .reply(200, []);
+      // Tree scan returns one skill
+      setupSkillsTreeMocks([{ id: 'test-skill', name: 'test-skill', description: 'Test skill' }]);
 
       const adapter = new SkillsAdapter(mockSource);
       const result = await adapter.validate();
@@ -343,7 +336,7 @@ Instructions for ${skill.name}
     test('should fail validation when skills/ directory is missing', async () => {
       setupValidationMocks();
 
-      // Mock 404 for skills directory
+      // Mock 404 for skills directory existence probe
       nock('https://api.github.com')
         .get('/repos/test-owner/test-skills-repo/contents/skills')
         .reply(404, { message: 'Not Found' });
@@ -358,12 +351,14 @@ Instructions for ${skill.name}
     test('should warn when no valid skills found', async () => {
       setupValidationMocks();
 
-      // Empty skills directory - need to mock twice (once for validate check, once for scan)
+      // Existence probe returns 200 (directory exists)
       nock('https://api.github.com')
         .get('/repos/test-owner/test-skills-repo/contents/skills')
-        .reply(200, [])
-        .get('/repos/test-owner/test-skills-repo/contents/skills')
         .reply(200, []);
+      // Tree scan returns no SKILL.md entries
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-skills-repo/git/trees/main?recursive=1')
+        .reply(200, { tree: [], truncated: false });
 
       const adapter = new SkillsAdapter(mockSource);
       const result = await adapter.validate();
