@@ -33,7 +33,9 @@ jobs:
     name: Security Analysis & Vulnerability Scanning
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       security-events: write
+      pull-requests: write
 
     steps:
       - name: Harden Runner
@@ -62,12 +64,19 @@ jobs:
           npm ci --fund=false
           npm run build
 
-      - name: Install dependencies with audit
+      - name: Install dependencies
         working-directory: ${{ env.EXTENSION_DIR }}
         shell: bash
-        run: |
-          npm ci --audit --fund=false
-          npm audit --omit=dev --audit-level=moderate
+        run: npm ci --fund=false
+
+      - name: Report pre-existing vulnerabilities on PR
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/npm-audit-pr-comment
+        with:
+          working-directory: ${{ github.workspace }}
+          audit-flags: --omit=dev
+          min-severity: moderate
+          label: extension
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master

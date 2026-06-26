@@ -1,0 +1,36 @@
+name: Dependency Review
+
+# Single repo-wide gate for newly-introduced vulnerabilities.
+# dependency-review-action diffs the PR's dependency graph (base -> head), so it
+# only flags dependencies CHANGED by this PR — per-package scoping comes for free.
+# Pre-existing vulnerabilities are reported separately (non-blocking) by the
+# npm-audit-pr-comment action in each package's CI workflow.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/package.json'
+      - '**/package-lock.json'
+
+jobs:
+  dependency-review:
+    name: Dependency Review (fail on new vulnerabilities)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          vulnerability-check: true
+          comment-summary-in-pr: on-failure

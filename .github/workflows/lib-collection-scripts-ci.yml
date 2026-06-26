@@ -33,10 +33,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      security-events: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: lib
+          format: "sarif"
+          output: "trivy-lib-results.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: "trivy-lib-results.sarif"
+          category: lib
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -55,10 +71,6 @@ jobs:
       - name: Run linting
         working-directory: lib
         run: npm run lint
-
-      - name: Audit for vulnerabilities
-        working-directory: lib
-        run: npm audit --audit-level=high
 
       - name: Run tests
         working-directory: lib
