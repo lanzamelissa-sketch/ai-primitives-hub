@@ -79,6 +79,7 @@ interface CollectionManifest {
   };
   mcp?: {
     items?: Record<string, any>;
+    inputs?: any[];
   };
   mcpServers?: Record<string, any>;
 }
@@ -242,9 +243,13 @@ export class LocalAwesomeCopilotAdapter extends RepositoryAdapter {
       (bundle as any).collectionFile = collectionFile;
       (bundle as any).breakdown = breakdown;
 
-      // Attach MCP servers for pre-installation display
+      // Attach MCP servers and inputs for pre-installation display
       if (mcpServers && Object.keys(mcpServers).length > 0) {
         (bundle as any).mcpServers = mcpServers;
+      }
+      const mcpInputs = collection.mcp?.inputs;
+      if (mcpInputs && mcpInputs.length > 0) {
+        (bundle as any).mcpInputs = mcpInputs;
       }
 
       return bundle;
@@ -382,7 +387,8 @@ export class LocalAwesomeCopilotAdapter extends RepositoryAdapter {
       license: 'MIT',
       tags: collection.tags || [],
       prompts,
-      ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {})
+      ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+      ...(collection.mcp?.inputs && collection.mcp.inputs.length > 0 ? { mcpInputs: collection.mcp.inputs } : {})
     };
   }
 
