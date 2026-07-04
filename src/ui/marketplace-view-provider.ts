@@ -5,6 +5,8 @@
  */
 
 import * as fs from 'node:fs';
+import MarkdownIt from 'markdown-it';
+import sanitizeHtml from 'sanitize-html';
 import * as vscode from 'vscode';
 import {
   RegistryManager,
@@ -42,13 +44,15 @@ import {
  * Message types sent from webview to extension
  */
 interface WebviewMessage {
-  type: 'refresh' | 'install' | 'update' | 'uninstall' | 'openDetails' | 'openPromptFile' | 'installVersion' | 'getVersions' | 'toggleAutoUpdate' | 'openSourceRepository' | 'completeSetup';
+  type: 'refresh' | 'install' | 'update' | 'uninstall' | 'openDetails' | 'openPromptFile' | 'installVersion'
+    | 'getVersions' | 'toggleAutoUpdate' | 'openSourceRepository' | 'completeSetup' | 'openExternalLink';
   bundleId?: string;
   installPath?: string;
   filePath?: string;
   version?: string;
   enabled?: boolean;
   sourceId?: string;
+  url?: string;
 }
 
 /**
@@ -71,6 +75,7 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
   private sourceSyncDebounceTimer?: NodeJS.Timeout;
   private isLoadingBundles = false;
   private disposables: vscode.Disposable[] = [];
+  private markDownIt: InstanceType<typeof MarkdownIt> | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -101,7 +106,8 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
       // Auto-update preference changes
       this.registryManager.onAutoUpdatePreferenceChanged(() => this.loadBundles()),
       // Repository bundle changes (lockfile changes, workspace folder changes)
-      this.registryManager.onRepositoryBundlesChanged(() => this.loadBundles())
+      this.registryManager.onRepositoryBundlesChanged(() => this.loadBundles()),
+      this.registryManager.onReadmeDownloaded(() => this.loadBundles())
     );
   }
 
@@ -172,6 +178,38 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
       void this.loadBundles();
     }, UI_CONSTANTS.SOURCE_SYNC_DEBOUNCE_MS);
   }
+
+  /**
+   * Get a singleton instance of MarkdownIt for rendering markdown content
+   * @returns MarkdownIt instance
+   */
+  private getMarkdownItInstance(): InstanceType<typeof MarkdownIt> {
+    if (!this.markDownIt) {
+      this.markDownIt = new MarkdownIt({ html: false });
+    }
+    return this.markDownIt;
+  }
+
+  // private handleReadmeDownloaded(sourceId: string, bundleIds: string[], panel: vscode.WebviewPanel): void {
+  //   // TODO handle render through the details view
+  //   // Handle messages from the details panel
+  //   panel.webview.onDidReceiveMessage(
+  //     async (message) => {
+  //       if (message.type === 'openPromptFile') {
+  //         await this.openPromptFileInEditor(message.installPath, message.filePath);
+  //       } else if (message.type === 'toggleAutoUpdate') {
+  //         await this.handleToggleAutoUpdate(message.bundleId, message.enabled);
+  //         // Update the panel with new status
+  //         if (installed) {
+  //           const newStatus = await this.registryManager.autoUpdateService?.isAutoUpdateEnabled(installed.bundleId) || false;
+  //           panel.webview.postMessage({ type: 'autoUpdateStatusChanged', enabled: newStatus });
+  //         }
+  //       }
+  //     },
+  //     undefined,
+  //     this.context.subscriptions
+  //   );
+  // }
 
   /**
    * Find installed bundle by marketplace bundle ID using identity matching
@@ -532,6 +570,12 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
         await this.handleCompleteSetup();
         break;
       }
+      case 'openExternalLink': {
+        if (message.url) {
+          await this.handleOpenExternalLink(message.url);
+        }
+        break;
+      }
       default: {
         // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- value is safely stringifiable at runtime
         this.logger.warn(`Unknown message type: ${message.type}`);
@@ -560,6 +604,39 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       this.logger.error('Failed to open source repository', error as Error);
       vscode.window.showErrorMessage(`Failed to open repository: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Open an external link from rendered README content.
+   *
+   * Prompts the user for confirmation before opening, since the URL originates
+   * from untrusted README markdown. Only http(s) and mailto links are opened.
+   * @param url - The URL to open externally
+   */
+  private async handleOpenExternalLink(url: string): Promise<void> {
+    let parsed: vscode.Uri;
+    try {
+      parsed = vscode.Uri.parse(url, true);
+    } catch {
+      this.logger.warn(`Ignoring malformed external link: ${url}`);
+      return;
+    }
+
+    const scheme = parsed.scheme.toLowerCase();
+    if (!['http', 'https', 'mailto'].includes(scheme)) {
+      this.logger.warn(`Ignoring external link with unsupported scheme: ${url}`);
+      return;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+      `Do you want to open this external link?\n\n${url}`,
+      { modal: true },
+      'Open'
+    );
+
+    if (choice === 'Open') {
+      await vscode.env.openExternal(parsed);
     }
   }
 
@@ -852,6 +929,55 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Render markdown to HTML using markdown-it
+   * @param rawmarkdown - The raw markdown string to render
+   * @returns The rendered HTML string
+   */
+  private getMarkdownRender(rawmarkdown: string): string {
+    const md = this.getMarkdownItInstance();
+    const html = md.render(rawmarkdown);
+    return sanitizeHtml(html, {
+      // 'a' is already part of the defaults; 'img' is added for inline images
+      allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img']),
+      allowedAttributes: {
+        ...sanitizeHtml.defaults.allowedAttributes,
+        a: ['href', 'title', 'data-external-link', 'rel', 'class'],
+        img: ['src', 'alt', 'title', 'width', 'height']
+      },
+      // Allow safe external link/image schemes — still blocks data: and javascript:
+      allowedSchemes: ['https', 'http', 'mailto'],
+      // Keep images HTTPS-only (matches the webview CSP `img-src https:`); links may
+      // additionally use http/mailto since they are opened via vscode.env.openExternal.
+      allowedSchemesByTag: {
+        img: ['https'],
+        a: ['https', 'http', 'mailto']
+      },
+      transformTags: {
+        // Move the link target into a data attribute and DROP the href. Keeping
+        // href would let VS Code's built-in webview link handling open the URL
+        // directly (bypassing our confirmation prompt). The webview JS reads
+        // data-external-link on click and routes through vscode.env.openExternal.
+        a: (tagName, attribs) => {
+          const href = attribs.href;
+          if (href) {
+            const { href: _dropped, ...rest } = attribs;
+            return {
+              tagName,
+              attribs: {
+                ...rest,
+                'data-external-link': href,
+                class: rest.class ? `${rest.class} external-link` : 'external-link',
+                rel: 'noopener noreferrer'
+              }
+            };
+          }
+          return { tagName, attribs };
+        }
+      }
+    });
+  }
+
+  /**
    * Get HTML for bundle details panel
    * @param webview
    * @param bundle
@@ -881,7 +1007,7 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
     );
 
     // Generate CSP
-    const cspSource = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'unsafe-inline';`;
+    const cspSource = `default-src 'none'; img-src https: ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
 
     // Load HTML template
     const htmlPath = vscode.Uri.joinPath(
@@ -909,8 +1035,7 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
     </div>`
       : '';
 
-    const breakdownContent = isInstalled
-      ? `
+    const breakdownContent = `
         <div class="breakdown">
             <div class="breakdown-item">
                 <div class="breakdown-icon">💬</div>
@@ -937,13 +1062,15 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
                 <div class="breakdown-count">${breakdown.mcpServers}</div>
                 <div class="breakdown-label">MCP Servers</div>
             </div>
-        </div>`
-      : `
-        <div class="info-message">
-            <p style="text-align: center; padding: 20px; color: var(--vscode-descriptionForeground);">
-                📦 Install this bundle to see the detailed content breakdown.
-            </p>
         </div>`;
+
+    const detailsSection = `
+    <div class="section" id="readme-section"${bundle.readme ? '' : ' style="display:none"'}>
+        <h2>README</h2>
+        <div class="details-content">
+            ${bundle.readme ? this.getMarkdownRender(bundle.readme) : ''}
+        </div>
+    </div>`;
 
     const installedInfoRows = isInstalled
       ? `
@@ -992,6 +1119,7 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
       .replace('{{promptsSection}}', promptsSection)
       .replace('{{autoUpdateEnabled}}', String(autoUpdateEnabled))
       .replace('{{bundleId}}', bundleId)
+      .replace('{{detailsSection}}', detailsSection)
       .replace(/\{\{nonce\}\}/g, nonce)
       .replace('{{scriptUri}}', scriptUri.toString());
 
@@ -1130,7 +1258,7 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
     const nonce = this.getNonce();
 
     // Generate CSP
-    const cspSource = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+    const cspSource = `default-src 'none'; img-src https: ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
 
     // Load HTML template from external file
     const htmlPath = vscode.Uri.joinPath(
@@ -1240,21 +1368,50 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
         }
       );
 
+      const readmeDisposable = this.registryManager.onReadmeDownloaded(async ({ bundleIds }) => {
+        if (!bundleIds.includes(bundleId)) {
+          return;
+        }
+
+        const updatedBundle = await this.registryManager.getBundleDetails(bundleId);
+        if (!updatedBundle.readme) {
+          return;
+        }
+
+        panel.webview.postMessage({
+          type: 'readmeUpdated',
+          readmeHtml: this.getMarkdownRender(updatedBundle.readme)
+        });
+      });
+
       // Set HTML content
       panel.webview.html = this.getBundleDetailsHtml(panel.webview, bundle, installed, breakdown, autoUpdateEnabled);
 
       // Handle messages from the details panel
       panel.webview.onDidReceiveMessage(
         async (message) => {
-          if (message.type === 'openPromptFile') {
-            await this.openPromptFileInEditor(message.installPath, message.filePath);
-          } else if (message.type === 'toggleAutoUpdate') {
-            await this.handleToggleAutoUpdate(message.bundleId, message.enabled);
-            // Update the panel with new status
-            if (installed) {
-              const newStatus = await this.registryManager.autoUpdateService?.isAutoUpdateEnabled(installed.bundleId) || false;
-              panel.webview.postMessage({ type: 'autoUpdateStatusChanged', enabled: newStatus });
+          switch (message.type) {
+            case 'openPromptFile': {
+              await this.openPromptFileInEditor(message.installPath, message.filePath);
+
+              break;
             }
+            case 'openExternalLink': {
+              await this.handleOpenExternalLink(message.url);
+
+              break;
+            }
+            case 'toggleAutoUpdate': {
+              await this.handleToggleAutoUpdate(message.bundleId, message.enabled);
+              // Update the panel with new status
+              if (installed) {
+                const newStatus = await this.registryManager.autoUpdateService?.isAutoUpdateEnabled(installed.bundleId) || false;
+                panel.webview.postMessage({ type: 'autoUpdateStatusChanged', enabled: newStatus });
+              }
+
+              break;
+            }
+          // No default
           }
         },
         undefined,
@@ -1270,6 +1427,9 @@ export class MarketplaceViewProvider implements vscode.WebviewViewProvider {
           }
         })
       );
+      panel.onDidDispose(() => {
+        readmeDisposable.dispose();
+      });
     } catch (error) {
       this.logger.error('Failed to open bundle details', error as Error);
       vscode.window.showErrorMessage('Failed to open bundle details');

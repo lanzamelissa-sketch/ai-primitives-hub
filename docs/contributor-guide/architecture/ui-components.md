@@ -31,6 +31,7 @@ graph TD
 | `getVersions` | Webview → Host | Get available versions |
 | `toggleAutoUpdate` | Webview → Host | Toggle auto-update |
 | `openSourceRepository` | Webview → Host | Open source repo |
+| `openExternalLink` | Webview → Host | Open a README link externally (prompts user) |
 
 ### Interaction Flow
 
@@ -42,6 +43,10 @@ graph TD
 6. User clicks Install → `postMessage({type: 'install'})`
 7. Host calls `RegistryManager.installBundle()`
 8. Success → refresh tiles with installed badge
+
+### README Rendering
+
+Bundle README markdown is rendered to HTML in the details panel via `markdown-it` and sanitized with `sanitize-html` (`getMarkdownRender`). Links (`<a>`) are preserved and tagged with a `data-external-link` attribute. The details webview intercepts clicks on these links and sends an `openExternalLink` message; the host then prompts the user for confirmation before opening the URL with `vscode.env.openExternal`. Images remain HTTPS-only to match the webview CSP; links may use `https`, `http`, or `mailto`.
 
 ## Tree View
 
