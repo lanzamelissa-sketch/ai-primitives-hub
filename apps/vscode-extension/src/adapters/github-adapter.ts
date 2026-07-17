@@ -403,7 +403,7 @@ export class GitHubAdapter extends RepositoryAdapter {
 
                   break;
                 }
- // No default
+                // No default
               }
             }
             reject(new Error(errorMsg));
@@ -606,8 +606,14 @@ export class GitHubAdapter extends RepositoryAdapter {
     }
 
     // Attach MCP servers from manifest for content breakdown display
-    if (manifest?.mcpServers && typeof manifest.mcpServers === 'object') {
-      (bundle as any).mcpServers = manifest.mcpServers;
+    // Support both legacy 'mcpServers' key and new 'mcp.items' key
+    const mcpServers = manifest?.mcpServers || manifest?.mcp?.items;
+    if (mcpServers && typeof mcpServers === 'object') {
+      (bundle as any).mcpServers = mcpServers;
+    }
+    const mcpInputs = manifest?.mcp?.inputs || manifest?.mcpInputs;
+    if (mcpInputs && Array.isArray(mcpInputs) && mcpInputs.length > 0) {
+      (bundle as any).mcpInputs = mcpInputs;
     }
 
     return bundle;

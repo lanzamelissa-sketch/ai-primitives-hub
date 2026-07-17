@@ -277,6 +277,132 @@ tags:
       assert.strictEqual(bundles.length, 0);
     });
 
+    test('should attach mcpInputs to bundle when manifest has mcp.inputs', async () => {
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-repo/releases')
+        .reply(200, [
+          {
+            tag_name: 'v1.0.0',
+            name: 'Release with MCP inputs',
+            body: '',
+            published_at: '2025-01-01T00:00:00Z',
+            assets: [
+              {
+                name: 'deployment-manifest.yml',
+                url: 'https://api.github.com/repos/test-owner/test-repo/releases/assets/100',
+                browser_download_url: 'https://github.com/.../deployment-manifest.yml',
+                size: 512
+              },
+              {
+                name: 'bundle.zip',
+                url: 'https://api.github.com/repos/test-owner/test-repo/releases/assets/101',
+                browser_download_url: 'https://github.com/.../bundle.zip',
+                size: 2048
+              }
+            ]
+          }
+        ]);
+
+      const manifestYaml = `
+id: mcp-inputs-bundle
+name: MCP Inputs Bundle
+version: 1.0.0
+description: Bundle with MCP inputs
+author: test-author
+mcp:
+  inputs:
+    - id: ocServer
+      type: promptString
+      description: OpenShift API server URL
+      default: https://api.example.com:6443
+    - id: ocToken
+      type: promptString
+      description: OpenShift access token
+      password: true
+  items:
+    openshift:
+      type: stdio
+      command: podman
+      args:
+        - run
+        - OC_SERVER=\${input:ocServer}
+`;
+
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-repo/releases/assets/100')
+        .reply(200, manifestYaml);
+
+      const adapter = new GitHubAdapter(mockSource);
+      const bundles = await adapter.fetchBundles();
+
+      assert.strictEqual(bundles.length, 1);
+      const bundle = bundles[0] as any;
+
+      assert.ok(bundle.mcpInputs, 'Bundle should have mcpInputs attached');
+      assert.strictEqual(bundle.mcpInputs.length, 2, 'Should have 2 inputs');
+      assert.strictEqual(bundle.mcpInputs[0].id, 'ocServer');
+      assert.strictEqual(bundle.mcpInputs[1].id, 'ocToken');
+      assert.strictEqual(bundle.mcpInputs[1].password, true);
+
+      assert.ok(bundle.mcpServers, 'Bundle should have mcpServers attached from mcp.items');
+      assert.ok(bundle.mcpServers['openshift'], 'Should include openshift server');
+    });
+
+    test('should attach mcpServers to bundle from legacy mcpServers key in manifest', async () => {
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-repo/releases')
+        .reply(200, [
+          {
+            tag_name: 'v1.0.0',
+            name: 'Legacy MCP release',
+            body: '',
+            published_at: '2025-01-01T00:00:00Z',
+            assets: [
+              {
+                name: 'deployment-manifest.yml',
+                url: 'https://api.github.com/repos/test-owner/test-repo/releases/assets/200',
+                browser_download_url: 'https://github.com/.../deployment-manifest.yml',
+                size: 512
+              },
+              {
+                name: 'bundle.zip',
+                url: 'https://api.github.com/repos/test-owner/test-repo/releases/assets/201',
+                browser_download_url: 'https://github.com/.../bundle.zip',
+                size: 2048
+              }
+            ]
+          }
+        ]);
+
+      const manifestYaml = `
+id: legacy-mcp-bundle
+name: Legacy MCP Bundle
+version: 1.0.0
+description: Bundle with legacy mcpServers key
+author: test-author
+mcpServers:
+  myserver:
+    type: stdio
+    command: node
+    args:
+      - server.js
+`;
+
+      nock('https://api.github.com')
+        .get('/repos/test-owner/test-repo/releases/assets/200')
+        .reply(200, manifestYaml);
+
+      const adapter = new GitHubAdapter(mockSource);
+      const bundles = await adapter.fetchBundles();
+
+      assert.strictEqual(bundles.length, 1);
+      const bundle = bundles[0] as any;
+
+      assert.ok(bundle.mcpServers, 'Bundle should have mcpServers from legacy key');
+      assert.ok(bundle.mcpServers['myserver'], 'Should include myserver');
+      assert.strictEqual(bundle.mcpInputs, undefined, 'Should not have mcpInputs when not defined');
+    });
+
     test('should handle empty releases', async () => {
       nock('https://api.github.com')
         .get('/repos/test-owner/test-repo/releases')
